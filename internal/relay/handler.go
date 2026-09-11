@@ -220,6 +220,14 @@ func Forward(format llm.APIFormat) gin.HandlerFunc {
 					failedItemID = item.ID
 					failures = 1
 				}
+
+				// 手动模式按同一套次数和间隔重试选定成员, 但不参与冷却和故障切换;
+				// 达到上限后把最后一次上游错误返回客户端, 避免请求无限循环。
+				if group.Mode == model.GroupModeManual && failures >= group.RelayConfig.MemberMaxAttempts {
+					failRequest(c, inbound, request, err)
+					return
+				}
+
 				// 达到总尝试次数时成员进入冷却并立即重新选路, 否则等待后重试。
 				if recordRouteFailure(group, item.ID, failures) {
 					continue
@@ -354,6 +362,14 @@ func rejectRequest(c *gin.Context, inbound transformer.Inbound, err error) {
 		StatusCode: http.StatusBadRequest,
 		Detail:     llm.ErrorDetail{Message: err.Error(), Type: "invalid_request_error"},
 	})
+	c.Data(response.StatusCode, "application/json", response.Body)
+	c.Abort()
+}
+
+// failRequest 以最后一次上游错误结束已登记的请求, 并按客户端协议返回错误正文。
+func failRequest(c *gin.Context, inbound transformer.Inbound, request *RequestState, err error) {
+	request.markFailed(err, "", nil)
+	response := inbound.TransformError(c.Request.Context(), err)
 	c.Data(response.StatusCode, "application/json", response.Body)
 	c.Abort()
 }
